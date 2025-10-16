@@ -1,3 +1,5 @@
+import io
+from fastapi.responses import StreamingResponse
 import os
 from pathlib import Path
 from typing import List, Dict, Tuple
@@ -380,5 +382,12 @@ class WellLSTMModel:
             return fig
         else:
             plt.show(fig)
+
+    def _plot_to_response(fig):
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", bbox_inches="tight")
+        buf.seek(0)
+        plt.close(fig)
+        return StreamingResponse(buf, media_type="image/png")
 
 

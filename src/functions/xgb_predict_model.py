@@ -1,3 +1,5 @@
+import io
+from fastapi.responses import StreamingResponse
 import os
 import joblib
 import re
@@ -494,3 +496,9 @@ class XGBModel:
         plt.show()
         return out
     
+    def _plot_to_response(fig):
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", bbox_inches="tight")
+        buf.seek(0)
+        plt.close(fig)
+        return StreamingResponse(buf, media_type="image/png")

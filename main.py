@@ -1,16 +1,20 @@
-from fastapi import FastAPI, UploadFile, Form
-from fastapi.responses import FileResponse, JSONResponse
-import pandas as pd
-from src.functions.lstm_predict_model import WellLSTMModel
-from src.functions.xgb_predict_model import XGBModel
-from src.functions.gen_data import NigerDeltaDataTransformer
-from src.functions.statistics_calculator import StatisticsCalculator
 import io
 import pandas as pd
 import matplotlib.pyplot as plt
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import os
+
+from fastapi import FastAPI, UploadFile, File
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+import pandas as pd
+from src.functions.lstm_predict_model import WellLSTMModel
+from src.functions.xgb_predict_model import XGBModel
+from src.functions.statistics_calculator import StatisticsCalculator
+from src.functions.reservoir_correlation_analyzer_si_unit import ReservoirCorrelationAnalyzerSI
+from src.functions.unit_converter import UnitConverter
+from src.functions.empirical_to_si_converter import EmpiricalToSIConverter
+from src.functions.excel_uploader import ExcelUploader
+
 
 app = FastAPI(
     title="Well Production Using XGB/LSTM Model API",
@@ -21,7 +25,9 @@ app = FastAPI(
     openapi_url="/openapi.json"  # OpenAPI JSON URL
 )
 
+UPLOAD_DIR = "./src/resource/"
 NIGER_DELTA_EXCEL = "./src/resource/niger_delta.xlsx"
+NIGER_DELTA_EXCEL_SI_UNITS = "./src/resource/niger_delta_si_units.xlsx"
 INPUT_EXCEL = "./src/resource/oilfield_sample_data_with_units.xlsx"
 niger_delta_to_back_date = "./src/resource/niger_delta_to_back_date.xlsx"
 XGB_MODEL_PATH = "./src/created_model/xgb/xgb_model.pkl"
@@ -38,6 +44,13 @@ XGB_PREDICTION_EXCEL = "./src/prediction/xgb/predictions_xgb.xlsx"
 
 STATISTICAL_DIR = "./src/statistical"
 STATISTICAL_EXCEL = "./src/statistical/statistical_data.xlsx"
+STATISTICAL_EXCEL_SI_UNIT = "./src/statistical/statistical_data_si_unit.xlsx"
+CORR_MATRIX_DATA_PATH = "./src/statistical/corr_matrix_data.xlsx"
+
+COR_PLOT_PATH = "./src/plot/cor/correlation_heatmap.png"
+COR_TOP_PLOT_PATH = "./src/plot/cor/correlation_top_heatmap.png"
+
+
 # save_dir="src/predictions/xgb"
 os.makedirs(STATISTICAL_DIR, exist_ok=True)
 class PlotRequest(BaseModel):
@@ -47,6 +60,9 @@ class PlotRequest(BaseModel):
 class PlotTargetRequest(PlotRequest):
     target: str
 
+class UploadFileRequest(BaseModel):
+    filename: str
+
 
 TARGET_COLS = [
     "oil_rate_bopd (BOPD)",
@@ -54,15 +70,19 @@ TARGET_COLS = [
     "water_rate_bwpd (BWPD)"
 ]
 
+@app.post("/upload_excel/")
+async def upload_excel(file: UploadFile = File(...)):
+    """Endpoint to upload and save Excel file"""
 
-@app.get("/gen_data_statistics")
-async def gen_data():
-    df = pd.read_excel(NIGER_DELTA_EXCEL)
-    stat = StatisticsCalculator(df)
+    # Instantiate the uploader class
+    uploader = ExcelUploader(upload_dir=UPLOAD_DIR)
+    file_path = await uploader.save_file(file)
+    filename = os.path.basename(file_path)
 
-    stat.save_to_excel(STATISTICAL_EXCEL)
+    return JSONResponse({
+        "message": "File uploaded successfully!"
+    })
 
-    return {"success": "Statistics data created"}
 
 @app.get("/train_lstm")
 async def train():
@@ -83,14 +103,6 @@ async def predict():
     return {"status": "predicted", "saved_file": str(model.predicted_excel), "error": errors}
 
 
-def _plot_to_response(fig):
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", bbox_inches="tight")
-    buf.seek(0)
-    plt.close(fig)
-    return StreamingResponse(buf, media_type="image/png")
-
-
 @app.post("/plot_lstm_target")
 async def plot(request: PlotTargetRequest):
     
@@ -108,7 +120,8 @@ async def plot(request: PlotTargetRequest):
     else:
         fig = model.plot_actual_vs_pred_from_file(LSTM_PREDICTION_EXCEL, request.well_id, target,
                                   save_dir=LSTM_PLOT_DIR, return_fig=True)
-    return _plot_to_response(fig)
+    return model._plot_to_response(fig)
+
 
 @app.post("/plot_lstm_all")
 async def plot(request: PlotRequest):
@@ -164,7 +177,7 @@ async def plot(request: PlotRequest):
         fig = model.plot_actual_vs_pred_from_file(XGB_PREDICTION_EXCEL, request.well_id, target,
                                   save_dir=XGB_PLOT_DIR, return_fig=True)
         
-    return _plot_to_response(fig)
+    return model._plot_to_response(fig)
 
 @app.post("/plot_xgb_all/")
 async def plot(request: PlotRequest):
@@ -179,3 +192,96 @@ async def plot(request: PlotRequest):
     if out is None:
         return JSONResponse(content={"error": "well not found"}, status_code=404)
     return FileResponse(out)
+
+@app.get("/gen_data_statistics")
+async def gen_data():
+    df = pd.read_excel(NIGER_DELTA_EXCEL)
+    stat = StatisticsCalculator(df)
+
+    stat.save_to_excel(STATISTICAL_EXCEL)
+
+    return {"success": "Statistics data created"}
+
+
+@app.get("/gen_data_statistics_si_unit")
+async def gen_data():
+    df = pd.read_excel(NIGER_DELTA_EXCEL_SI_UNITS)
+    stat = StatisticsCalculator(df)
+
+    stat.save_to_excel(STATISTICAL_EXCEL_SI_UNIT)
+
+    return {"success": "Statistics data created"}
+
+
+@app.get("/get_correlation")
+def get_weather_panel_historical_data():
+
+    df = pd.read_excel(NIGER_DELTA_EXCEL)
+
+    analyzer = ReservoirCorrelationAnalyzerSI(df)
+    analyzer.preprocess()
+    analyzer.calculate_correlation()
+
+    # Save full correlation matrix & heatmap
+    analyzer.save_correlation_excel(CORR_MATRIX_DATA_PATH)
+    analyzer.plot_heatmap("./src/plot/cor/reservoir_heatmap.png", mask=False)
+
+    # Correlation with Oil Rate
+    analyzer.plot_target_correlation(
+        target="oil_rate (m³/day)",
+        filename="./src/plot/cor/oil_corr_bar.png"
+    )
+
+    # Correlation with Gas Rate
+    analyzer.plot_target_correlation(
+        target="gas_rate (m³/s)",
+        filename="./src/plot/cor/gas_corr_bar.png"
+    )
+
+    # Correlation with Water Rate
+    analyzer.plot_target_correlation(
+        target="water_rate (m³/day)",
+        filename="./src/plot/cor/water_corr_bar.png"
+    )
+
+    return {"Success": "CORR matrix Data created and save"}
+
+@app.post("/convert-to-si/")
+async def convert_to_si():
+
+    try:
+ 
+        # Run conversion
+        converter = UnitConverter(NIGER_DELTA_EXCEL, NIGER_DELTA_EXCEL_SI_UNITS)
+        output_file, converted_cols = converter.run()
+
+        # Return file as response
+        if not converted_cols:
+            return JSONResponse(
+                {"warning": "No columns matched known empirical units."},
+                status_code=200
+            )
+
+        # Prepare response summary
+        summary = {
+            "converted_columns": [f"{old} → {new}" for old, new in converted_cols],
+            "output_file": "niger_delta_si_units.xlsx"
+        }
+
+        return FileResponse(
+            output_file,
+            filename="niger_delta_si_units.xlsx"
+        )
+
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@app.post("/convert-to-si-unit/")
+async def convert_to_si_unit():
+     # Run conversion
+    converter = EmpiricalToSIConverter(NIGER_DELTA_EXCEL, NIGER_DELTA_EXCEL_SI_UNITS)       
+    converter.run()
+        
+
+
